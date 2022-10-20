@@ -20,12 +20,15 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.824/labgob"
+	"6.824/labgob"
 	"6.824/labrpc"
 )
 
@@ -124,6 +127,30 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	err := e.Encode(rf.currentTerm)
+
+	if err != nil {
+		return
+	}
+
+	err = e.Encode(rf.votedFor)
+
+	if err != nil {
+		return
+	}
+
+	err = e.Encode(rf.log)
+
+	if err != nil {
+
+		return
+	}
+
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 // restore previously persisted state.
@@ -144,6 +171,29 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	err := d.Decode(&rf.currentTerm)
+
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	err = d.Decode(&rf.votedFor)
+
+	if err != nil {
+		println("Persits")
+		return
+	}
+
+	err = d.Decode(&rf.log)
+
+	if err != nil {
+		println("Persits")
+		return
+	}
 }
 
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
@@ -201,13 +251,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	canVote := (rf.votedFor == -1 || rf.votedFor == args.CandidateId)
 
-	if canVote && rf.isLogUpToDate(args.LastLogIndex, args.LastLogTerm) {
+	if canVote && rf.isCandidateLogUpToDate(args.LastLogIndex, args.LastLogTerm) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
+		rf.persist()
 	}
 }
 
-func (rf *Raft) isLogUpToDate(index int, term int) bool {
+func (rf *Raft) isCandidateLogUpToDate(index int, term int) bool {
 	lastLog := rf.log[len(rf.log)-1]
 
 	if lastLog.Term != term {
@@ -288,16 +339,23 @@ func (rf *Raft) AppendEntires(args *AppendEntiresArgs, reply *AppendEntiresReply
 		// If an existing entry conflicts with a new one (same index but different terms),
 		// delete the existing entry and all that follow it
 		conflictingEntries := rf.log[args.PrevLogIndex+1:]
+		needPersistance := false
 		var i int
 		for i = 0; i < min(len(conflictingEntries), len(args.Entries)); i++ {
 			if conflictingEntries[i].Term != args.Entries[i].Term {
 				rf.log = rf.log[:args.PrevLogIndex+1+i]
+				needPersistance = true
 				break
 			}
 		}
 		if i < len(args.Entries) {
 			// Append any new entries not already in the log
 			rf.log = append(rf.log, args.Entries[i:]...)
+			needPersistance = true
+		}
+
+		if needPersistance {
+			rf.persist()
 		}
 	}
 
@@ -378,6 +436,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.nextIndex[rf.me] += 1
 	rf.matchIndex[rf.me] = index
 
+	rf.persist()
 	rf.mu.Unlock()
 
 	commitChannel := make(chan bool)
@@ -424,8 +483,6 @@ func (rf *Raft) ticker() {
 
 		var timeToNextAction time.Duration
 
-		// println(rf.me, rf.serverState, rf.votedFor, rf.currentTerm)
-
 		if rf.serverState == Leader {
 			rf.electionTimeout = generateNextElectionTimeout()
 			timeToNextAction = time.Until(rf.electionTimeout)
@@ -458,6 +515,7 @@ func (rf *Raft) startElection() {
 		LastLogTerm:  rf.log[len(rf.log)-1].Term,
 	}
 
+	rf.persist()
 	rf.mu.Unlock()
 
 	votingChannel := make(chan bool)
@@ -488,12 +546,7 @@ func (rf *Raft) startElection() {
 
 			if rf.serverState == Candidate && rf.currentTerm == args.Term {
 				rf.serverState = Leader
-				lastLogIdx := 0
-
-				if len(rf.log) > 0 {
-					lastLogIdx = rf.log[len(rf.log)-1].Index
-				}
-
+				lastLogIdx := rf.log[len(rf.log)-1].Index
 				rf.nextIndex = make([]int, len(rf.peers))
 				rf.matchIndex = make([]int, len(rf.peers))
 
@@ -504,7 +557,7 @@ func (rf *Raft) startElection() {
 
 				rf.matchIndex[rf.me] = lastLogIdx
 
-				go rf.scheduleHeartbeat()
+				go rf.scheduleHeartbeat(args.Term)
 			}
 
 			rf.mu.Unlock()
@@ -536,13 +589,13 @@ func (rf *Raft) askForVote(peer int, votingChannel chan<- bool, args *RequestVot
 	votingChannel <- voteGranted
 }
 
-func (rf *Raft) scheduleHeartbeat() {
+func (rf *Raft) scheduleHeartbeat(electionTerm int) {
 	heartbeatInterval := time.Duration(100) * time.Millisecond
 
 	for !rf.killed() {
 		rf.mu.Lock()
 
-		if rf.serverState != Leader {
+		if rf.serverState != Leader || rf.currentTerm != electionTerm {
 			rf.mu.Unlock()
 			return
 		}
@@ -646,6 +699,8 @@ func (rf *Raft) stepDown(term int) {
 	rf.electionTimeout = generateNextElectionTimeout()
 	rf.currentTerm = term
 	rf.votedFor = -1
+
+	rf.persist()
 }
 
 func generateNextElectionTimeout() time.Time {
