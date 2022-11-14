@@ -21,7 +21,6 @@ import (
 	//	"bytes"
 
 	"bytes"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -206,21 +205,35 @@ func (rf *Raft) readPersist(data []byte) {
 	err := d.Decode(&rf.currentTerm)
 
 	if err != nil {
-		fmt.Println(err)
+		println(err)
 		return
 	}
 
 	err = d.Decode(&rf.votedFor)
 
 	if err != nil {
-		println("Persits")
+		println(err)
 		return
 	}
 
 	err = d.Decode(&rf.log)
 
 	if err != nil {
-		println("Persits")
+		println(err)
+		return
+	}
+
+	err = d.Decode(&rf.lastIncludedIndex)
+
+	if err != nil {
+		println(err)
+		return
+	}
+
+	err = d.Decode(&rf.lastIncludedTerm)
+
+	if err != nil {
+		println(err)
 		return
 	}
 }
@@ -241,7 +254,6 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	if !rf.killed() {
-		fmt.Println(rf.me, index, "snapshot")
 		rf.snapshotChannel <- Snapshot{Index: index, LogSnapshot: snapshot}
 	}
 }
@@ -307,7 +319,7 @@ func (rf *Raft) issueInstallSnapshot(peer int, term int) {
 		if reply.Term > rf.currentTerm {
 			rf.stepDown(reply.Term)
 		} else {
-			rf.nextIndex[peer] = min(rf.nextIndex[peer], args.LastIncludedIndex+1)
+			rf.nextIndex[peer] = max(rf.nextIndex[peer], args.LastIncludedIndex+1)
 			rf.matchIndex[peer] = max(rf.matchIndex[peer], args.LastIncludedIndex)
 		}
 	} else {
@@ -329,15 +341,17 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.stepDown(args.Term)
 	}
 
-	// check if snapshot is not out of date
-	if args.LastIncludedIndex <= rf.lastIncludedIndex {
+	snapshotNotOutOfDate := args.LastIncludedIndex <= rf.lastIncludedIndex
+	snapshotLogEntriesAlreadyApplied := args.LastIncludedIndex <= rf.lastApplied
+
+	if snapshotNotOutOfDate || snapshotLogEntriesAlreadyApplied {
 		rf.mu.Unlock()
 		return
 	}
 
 	rf.lastIncludedIndex = args.LastIncludedIndex
 	rf.lastIncludedTerm = args.LastIncludedTerm
-	rf.commitIndex = rf.lastIncludedIndex
+	rf.commitIndex = max(args.LastIncludedIndex, rf.commitIndex)
 	rf.lastApplied = rf.lastIncludedIndex
 
 	shouldDiscardLog := true
@@ -354,9 +368,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.log = make([]LogEntry, 0)
 	}
 
+	rf.saveStateAndSnapshot(args.Data)
 	rf.mu.Unlock()
 
-	rf.saveStateAndSnapshot(args.Data)
 	rf.snapshotInstalledChannel <- true
 }
 
@@ -374,9 +388,9 @@ func (rf *Raft) snapshoter() {
 		rf.mu.Lock()
 
 		if snapshotIndex > rf.lastIncludedIndex {
-			rf.lastIncludedIndex = snapshotIndex
 			rf.lastIncludedTerm = rf.log[snapshotIndex-rf.lastIncludedIndex-1].Term
 			rf.log = rf.log[snapshotIndex-rf.lastIncludedIndex:]
+			rf.lastIncludedIndex = snapshotIndex
 
 			rf.saveStateAndSnapshot(snapshotBytes)
 		}
@@ -469,8 +483,10 @@ func (rf *Raft) getAppendEntriesArgs(destinationPeer int) *AppendEntiresArgs {
 	var entries []LogEntry
 
 	if lastLogIndex, _ := rf.lastLogIndexAndTerm(); lastLogIndex <= prevLogIndex {
+		// follower has all logs
 		entries = nil
 	} else if prevLogIndex >= rf.lastIncludedIndex {
+		// peer only need an update from current log
 		newEntries := rf.log[prevLogIndex-rf.lastIncludedIndex:]
 		entries = make([]LogEntry, len(newEntries))
 		copy(entries, newEntries)
@@ -880,7 +896,6 @@ func (rf *Raft) issueAppendEntries(peer int, entryReplicatedChannel chan<- bool)
 
 				if rf.nextIndex[peer] < newNextIndex {
 					rf.nextIndex[peer] = newNextIndex
-					// trigger snapshot here?
 				}
 
 				if rf.matchIndex[peer] < newMatchIndex {
@@ -1018,7 +1033,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
 	rf.commitIndex = rf.lastIncludedIndex
 	rf.lastApplied = rf.lastIncludedIndex
 
