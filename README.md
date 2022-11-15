@@ -23,9 +23,9 @@ Link: https://pdos.csail.mit.edu/6.824/labs/lab-kvraft.html
 
 Paper: https://pdos.csail.mit.edu/6.824/papers/raft-extended.pdf (section 8)
 
-[] 3A: Key/value service without snapshots
+✅ 3A: Key/value service without snapshots
 
-[] 3B: Key/value service with snapshots
+[X] 3B: Key/value service with snapshots (unreliable)
 
 ### Other relevant papers:
 - https://static.usenix.org/event/nsdi11/tech/full_papers/Bolosky.pdf
