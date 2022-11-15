@@ -467,9 +467,10 @@ type AppendEntiresReply struct {
 	Term    int
 	Success bool
 
-	XTerm  int // term in the conflicting entry (if any)
-	XIndex int // index of first entry with that XTerm term (if any)
-	XLen   int
+	// fields used to optimize searching for common log entries between leader and follower
+	LastLogTerm        int
+	FirstIdxInLastTerm int
+	LastLogTermLen     int
 }
 
 func (rf *Raft) getAppendEntriesArgs(destinationPeer int) *AppendEntiresArgs {
@@ -526,7 +527,7 @@ func (rf *Raft) AppendEntires(args *AppendEntiresArgs, reply *AppendEntiresReply
 	lastLogIndex, _ := rf.lastLogIndexAndTerm()
 
 	if lastLogIndex < args.PrevLogIndex {
-		reply.XLen = lastLogIndex + 1
+		reply.LastLogTermLen = lastLogIndex + 1
 		return
 	}
 
@@ -557,9 +558,9 @@ func (rf *Raft) AppendEntires(args *AppendEntiresArgs, reply *AppendEntiresReply
 	}
 
 	if prevLogTerm != args.PrevLogTerm {
-		reply.XTerm = prevLogTerm
+		reply.LastLogTerm = prevLogTerm
 		for i := args.PrevLogIndex - rf.LastIncludedIndex - 1; i > -1; i-- {
-			reply.XIndex = rf.log[i].Index
+			reply.FirstIdxInLastTerm = rf.log[i].Index
 			if rf.log[i].Term != prevLogTerm {
 				break
 			}
@@ -742,13 +743,13 @@ func (rf *Raft) startElection() {
 	rf.serverState = Candidate
 	rf.votedFor = rf.me
 
-	lastLogIndex, lastLogTerm := rf.lastLogIndexAndTerm()
+	lastLogIndex, LastLogTerm := rf.lastLogIndexAndTerm()
 
 	args := RequestVoteArgs{
 		Term:         rf.currentTerm,
 		CandidateId:  rf.me,
 		LastLogIndex: lastLogIndex,
-		LastLogTerm:  lastLogTerm,
+		LastLogTerm:  LastLogTerm,
 	}
 
 	rf.persist()
@@ -908,30 +909,30 @@ func (rf *Raft) issueAppendEntries(peer int, entryReplicatedChannel chan<- bool)
 
 				// reply fails when peer's log is inconsistent
 				// so we need to lower the nextIndex till we find common point
-				if reply.XLen != 0 && reply.XTerm == 0 {
+				if reply.LastLogTermLen != 0 && reply.LastLogTerm == 0 {
 					// follower's log is too short
-					rf.nextIndex[peer] = reply.XLen
+					rf.nextIndex[peer] = reply.LastLogTermLen
 				} else {
 					var entryIndex int
 					var entryTerm int
 
 					for i := len(rf.log) - 1; i >= -1; i-- {
 						if i < 0 {
-							lastLogIndex, lastLogTerm := rf.lastLogIndexAndTerm()
+							lastLogIndex, LastLogTerm := rf.lastLogIndexAndTerm()
 							entryIndex = lastLogIndex
-							entryTerm = lastLogTerm
+							entryTerm = LastLogTerm
 						} else {
 							entryIndex = rf.log[i].Index
 							entryTerm = rf.log[i].Term
 						}
 
-						if entryTerm == reply.XTerm {
-							// leader has XTerm
+						if entryTerm == reply.LastLogTerm {
+							// leader has LastLogTerm
 							rf.nextIndex[peer] = entryIndex + 1
 							break
-						} else if entryTerm < reply.XTerm {
-							// leader doesn't have XTerm
-							rf.nextIndex[peer] = reply.XIndex
+						} else if entryTerm < reply.LastLogTerm {
+							// leader doesn't have LastLogTerm
+							rf.nextIndex[peer] = reply.FirstIdxInLastTerm
 							break
 						}
 
